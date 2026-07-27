@@ -14,6 +14,7 @@ px.defaults.template = "plotly_dark"
 PROJECT = "kmp-platform-database"
 
 
+@st.cache_resource
 def get_bigquery_client():
     # Streamlit Cloud 등 배포 환경에서는 .streamlit/secrets.toml(로컬) 또는
     # 앱 설정의 Secrets(클라우드)에 등록된 gcp_service_account를 사용한다.
@@ -43,7 +44,7 @@ def render_html(content: str):
     st.markdown(re.sub(r"\n\s*", "", content), unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
 def load_site_data():
     client = get_bigquery_client()
     query = f"""
@@ -55,7 +56,7 @@ def load_site_data():
     return client.query(query).to_dataframe()
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
 def load_kakao_products():
     client = get_bigquery_client()
     # 서비스 중 + 판매중인(현재 실제로 팔리고 있는) 상품만 대상으로 한다.
@@ -70,7 +71,7 @@ def load_kakao_products():
     return client.query(query).to_dataframe()
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
 def load_modu_products():
     client = get_bigquery_client()
     query = f"""
@@ -96,7 +97,7 @@ def _rank_products(products):
     return ranked
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
 def load_product_data():
     site_df = load_site_data()
 
