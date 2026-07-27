@@ -234,7 +234,12 @@ def render_modu_map_panel(site_selected, site_df, height=MAP_PANEL_HEIGHT):
 
     pjt_code = site_selected.split("(")[-1].rstrip(")")
     site_info = site_df[site_df["pjt_code"] == pjt_code]
-    modu_site_id = site_info.iloc[0]["modu_site_id"] if not site_info.empty else None
+    # 하나의 pjt_code에 site 행이 여러 개 붙어있을 수 있고(예: 미사용 카카오 연동이 남아있는 행),
+    # 그 중 일부만 modu_site_id를 갖고 있을 수 있다. 행 순서는 BigQuery가 보장해주지 않으므로
+    # 단순히 첫 행(iloc[0])을 쓰면 값이 있는데도 없는 것처럼 보일 수 있어, 값이 있는 행을 우선한다.
+    valid_ids = site_info["modu_site_id"].dropna()
+    valid_ids = valid_ids[valid_ids.astype(str).str.strip() != ""]
+    modu_site_id = valid_ids.iloc[0] if not valid_ids.empty else None
     if site_info.empty or pd.isna(modu_site_id) or not str(modu_site_id).strip():
         render_html(placeholder_box.format(msg="이 현장은 모두의주차장<br/>연동 ID가 없어 지도를<br/>표시할 수 없습니다."))
         return
