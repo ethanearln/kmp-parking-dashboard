@@ -219,17 +219,12 @@ def allday_stock_by_day(row_df, day_char):
     return (kakao_val + modu_val).sum()
 
 
-MAP_PANEL_HEIGHT = 900  # 기존 500px 대비 세로 1.8배. 정기권/종일권 스코어카드 총 높이도 이 상수 하나로만 맞춘다.
-
-
-def render_modu_map_panel(site_selected, site_df, height=MAP_PANEL_HEIGHT):
-    placeholder_box = (
-        '<div style="background:#1b1e24;border-radius:10px;padding:16px;'
-        f"height:{height}px;display:flex;align-items:center;justify-content:center;"
-        'text-align:center;color:#9aa0a6;font-size:13px;line-height:1.6;">{msg}</div>'
+def render_modu_map_panel(site_selected, site_df):
+    placeholder = (
+        '<div class="map-panel"><div class="map-placeholder">{msg}</div></div>'
     )
     if site_selected == "전체":
-        render_html(placeholder_box.format(msg="현장을 선택하면<br/>모두의주차장 지도가<br/>표시됩니다."))
+        render_html(placeholder.format(msg="현장을 선택하면<br/>모두의주차장 지도가<br/>표시됩니다."))
         return
 
     pjt_code = site_selected.split("(")[-1].rstrip(")")
@@ -241,14 +236,14 @@ def render_modu_map_panel(site_selected, site_df, height=MAP_PANEL_HEIGHT):
     valid_ids = valid_ids[valid_ids.astype(str).str.strip() != ""]
     modu_site_id = valid_ids.iloc[0] if not valid_ids.empty else None
     if site_info.empty or pd.isna(modu_site_id) or not str(modu_site_id).strip():
-        render_html(placeholder_box.format(msg="이 현장은 모두의주차장<br/>연동 ID가 없어 지도를<br/>표시할 수 없습니다."))
+        render_html(placeholder.format(msg="이 현장은 모두의주차장<br/>연동 ID가 없어 지도를<br/>표시할 수 없습니다."))
         return
 
     modu_map_url = f"https://app.modu.kr/map?type=P&id={modu_site_id}#sheet=1&event=0"
-    # 실제 렌더링 높이를 JS로 뒤늦게 바꾸면 Streamlit이 이 요소에 미리 예약해 둔
-    # 레이아웃 높이(LayoutConfig)와 어긋나 아래쪽 섹션과 겹쳐 보이는 문제가 있었다.
-    # 그래서 height를 서버에서 고정값으로 선언하고 클라이언트 쪽 리사이즈는 하지 않는다.
-    st.iframe(modu_map_url, height=height)
+    # st.iframe은 서버에서 고정 px 높이를 미리 예약해버려 뷰포트 크기에 반응할 수 없다.
+    # 원시 <iframe>을 CSS로 감싸면(.map-panel의 높이는 --panel-h 변수로 좌측 카드와 함께 계산됨)
+    # 창 크기가 바뀔 때 다시 실행 없이도 브라우저가 알아서 리사이즈해준다.
+    render_html(f'<div class="map-panel"><iframe src="{modu_map_url}"></iframe></div>')
 
 
 regular_totals = regular_stock_by_category(base_filtered)
@@ -259,9 +254,9 @@ weekend_avg = round((day_stock["토"] + day_stock["일"]) / 2)
 day_colors = {"월": "#eee", "화": "#eee", "수": "#eee", "목": "#eee", "금": "#eee", "토": "#5B9BD5", "일": "#E06666"}
 days_html = "".join(
     f"""
-    <div style="text-align:center;">
-        <div style="color:{day_colors[d]};font-size:14px;">{d}</div>
-        <div style="color:{day_colors[d]};font-size:26px;font-weight:700;">{day_stock[d]:,.0f}</div>
+    <div class="stat-item">
+        <div class="stat-label" style="color:{day_colors[d]};">{d}</div>
+        <div class="stat-value" style="color:{day_colors[d]};">{day_stock[d]:,.0f}</div>
     </div>
     """
     for d in ["월", "화", "수", "목", "금", "토", "일"]
@@ -269,42 +264,71 @@ days_html = "".join(
 
 regular_items_html = "".join(
     f"""
-    <div style="text-align:center;">
-        <div style="color:#ccc;font-size:15px;">{label}</div>
-        <div style="color:#fff;font-size:28px;font-weight:700;">{regular_totals[label]:,.0f}</div>
+    <div class="stat-item">
+        <div class="stat-label">{label}</div>
+        <div class="stat-value">{regular_totals[label]:,.0f}</div>
     </div>
     """
     for label in ["일반", "야간", "평일", "휴일"]
 )
 
-top_left, top_right = st.columns([19, 6])  # 기존 [4, 1](우측 20%) 대비 가로 1.2배(우측 24%)
+# 정기권/종일권 카드와 지도 패널의 높이를 전부 하나의 CSS 변수(--panel-h)에서 계산한다.
+# 뷰포트 높이(vh)를 기준으로 하되 너무 작아지거나 커지지 않게 clamp로 상하한을 둔다.
+# 세 영역이 같은 변수를 공유하므로 창 크기가 바뀌어도 서로 어긋나지 않고 함께 스케일된다.
+render_html(
+    """
+    <style>
+    :root { --panel-h: clamp(190px, 24vh, 300px); --panel-gap: 16px; }
+    .panel-box {
+        background:#1b1e24; border-radius:10px; box-sizing:border-box;
+        padding: clamp(14px, 1.8vw, 24px); height: var(--panel-h);
+        margin-bottom: var(--panel-gap); display:flex; flex-direction:column;
+    }
+    .panel-title { color:#9aa0a6; font-size: clamp(12px, 1vw, 15px); margin-bottom: 10px; text-align:center; }
+    .panel-row {
+        flex:1; min-height:0; display:flex; flex-wrap:wrap;
+        align-items:center; justify-content:space-around; gap: clamp(6px, 1.2vw, 18px) 24px;
+    }
+    .stat-item { text-align:center; }
+    .stat-label { color:#ccc; font-size: clamp(11px, 0.9vw, 14px); white-space:nowrap; }
+    .stat-value { color:#fff; font-weight:700; font-size: clamp(16px, 1.8vw, 26px); white-space:nowrap; }
+    .map-panel {
+        background:#1b1e24; border-radius:10px; overflow:hidden;
+        height: calc(var(--panel-h) * 2 + var(--panel-gap));
+    }
+    .map-panel iframe { width:100%; height:100%; border:0; display:block; }
+    .map-placeholder {
+        height:100%; box-sizing:border-box; padding:16px; display:flex;
+        align-items:center; justify-content:center; text-align:center;
+        color:#9aa0a6; font-size:13px; line-height:1.6;
+    }
+    </style>
+    """
+)
 
-SCORECARD_GAP = 16
-scorecard_height = (MAP_PANEL_HEIGHT - SCORECARD_GAP) / 2
+top_left, top_right = st.columns([19, 6])  # 기존 [4, 1](우측 20%) 대비 가로 1.2배(우측 24%)
 
 with top_left:
     render_html(
         f"""
-        <div style="background:#1b1e24;border-radius:10px;padding:24px;margin-bottom:{SCORECARD_GAP}px;height:{scorecard_height}px;box-sizing:border-box;display:flex;flex-direction:column;">
-            <div style="color:#9aa0a6;font-size:15px;margin-bottom:14px;text-align:center;">[정기권 재고 현황]</div>
-            <div style="flex:1;display:flex;align-items:center;justify-content:space-around;">
-                {regular_items_html}
-            </div>
+        <div class="panel-box">
+            <div class="panel-title">[정기권 재고 현황]</div>
+            <div class="panel-row">{regular_items_html}</div>
         </div>
         """
     )
     render_html(
         f"""
-        <div style="background:#1b1e24;border-radius:10px;padding:24px;height:{scorecard_height}px;box-sizing:border-box;display:flex;flex-direction:column;">
-            <div style="color:#9aa0a6;font-size:15px;margin-bottom:14px;text-align:center;">[종일권 재고 현황]</div>
-            <div style="flex:1;display:flex;align-items:center;justify-content:space-around;flex-wrap:nowrap;">
-                <div style="text-align:center;">
-                    <div style="color:#ccc;font-size:14px;">평일 평균</div>
-                    <div style="color:#fff;font-size:26px;font-weight:700;">{weekday_avg:,.0f}</div>
+        <div class="panel-box" style="margin-bottom:0;">
+            <div class="panel-title">[종일권 재고 현황]</div>
+            <div class="panel-row">
+                <div class="stat-item">
+                    <div class="stat-label">평일 평균</div>
+                    <div class="stat-value">{weekday_avg:,.0f}</div>
                 </div>
-                <div style="text-align:center;">
-                    <div style="color:#ccc;font-size:14px;">휴일 평균</div>
-                    <div style="color:#fff;font-size:26px;font-weight:700;">{weekend_avg:,.0f}</div>
+                <div class="stat-item">
+                    <div class="stat-label">휴일 평균</div>
+                    <div class="stat-value">{weekend_avg:,.0f}</div>
                 </div>
                 {days_html}
             </div>
@@ -313,7 +337,7 @@ with top_left:
     )
 
 with top_right:
-    render_modu_map_panel(site_selected, site_df, height=MAP_PANEL_HEIGHT)
+    render_modu_map_panel(site_selected, site_df)
 
 st.divider()
 st.subheader("플랫폼별 상품 비교")
