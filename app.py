@@ -1,3 +1,4 @@
+import base64
 import html
 import os
 import re
@@ -12,6 +13,17 @@ st.set_page_config(page_title="현장별 플랫폼 상품 비교", layout="wide"
 px.defaults.template = "plotly_dark"
 
 PROJECT = "kmp-platform-database"
+
+
+def _logo_data_uri(filename, mime):
+    path = os.path.join(os.path.dirname(__file__), "assets", filename)
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+KAKAO_LOGO_URI = _logo_data_uri("kakao_logo.svg", "image/svg+xml")
+MODU_LOGO_URI = _logo_data_uri("modu_logo.png", "image/png")
 
 
 @st.cache_resource
@@ -147,7 +159,14 @@ def load_product_data():
 df = load_product_data()
 site_df = load_site_data()
 
-st.title("현장별 플랫폼 상품 비교 대시보드")
+render_html(
+    """
+    <style>
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css');
+    html, body, [class*="css"] { font-family: 'Pretendard', -apple-system, 'Malgun Gothic', sans-serif; }
+    </style>
+    """
+)
 
 st.sidebar.header("필터")
 
@@ -170,6 +189,21 @@ if site_selected != "전체":
 filtered = base_filtered.copy()
 if ticket_selected:
     filtered = filtered[filtered["ticket_type"].isin(ticket_selected)]
+
+show_site_col = site_selected == "전체"
+header_subtitle = (
+    "전체 현장 · 카카오T vs 모두의주차장"
+    if show_site_col
+    else f"{site_selected.split(' (')[0]} · 카카오T vs 모두의주차장"
+)
+render_html(
+    f"""
+    <div style="margin-bottom:12px;">
+        <div style="font-size:clamp(22px,2.4vw,30px);font-weight:800;color:#fff;">현장별 플랫폼 상품 비교 대시보드</div>
+        <div style="font-size:clamp(13px,1.1vw,15px);color:#9aa0a6;margin-top:4px;">{header_subtitle}</div>
+    </div>
+    """
+)
 
 
 def classify_regular_product(name):
@@ -241,60 +275,17 @@ def render_modu_map_panel(site_selected, site_df):
 
     modu_map_url = f"https://app.modu.kr/map?type=P&id={modu_site_id}#sheet=1&event=0"
     # st.iframe은 서버에서 고정 px 높이를 미리 예약해버려 뷰포트 크기에 반응할 수 없다.
-    # 원시 <iframe>을 CSS로 감싸면(.map-panel의 높이는 --panel-h 변수로 좌측 카드와 함께 계산됨)
-    # 창 크기가 바뀔 때 다시 실행 없이도 브라우저가 알아서 리사이즈해준다.
+    # 원시 <iframe>을 CSS(aspect-ratio)로 감싸면 창 크기가 바뀔 때 다시 실행 없이도
+    # 브라우저가 알아서 1:1.8 비율을 유지한 채 리사이즈해준다.
     render_html(f'<div class="map-panel"><iframe src="{modu_map_url}"></iframe></div>')
 
 
-regular_totals = regular_stock_by_category(base_filtered)
-day_stock = {d: allday_stock_by_day(base_filtered, d) for d in ["월", "화", "수", "목", "금", "토", "일"]}
-weekday_avg = round((day_stock["월"] + day_stock["화"] + day_stock["수"] + day_stock["목"] + day_stock["금"]) / 5)
-weekend_avg = round((day_stock["토"] + day_stock["일"]) / 2)
-
-day_colors = {"월": "#eee", "화": "#eee", "수": "#eee", "목": "#eee", "금": "#eee", "토": "#5B9BD5", "일": "#E06666"}
-days_html = "".join(
-    f"""
-    <div class="stat-item">
-        <div class="stat-label" style="color:{day_colors[d]};">{d}</div>
-        <div class="stat-value" style="color:{day_colors[d]};">{day_stock[d]:,.0f}</div>
-    </div>
-    """
-    for d in ["월", "화", "수", "목", "금", "토", "일"]
-)
-
-regular_items_html = "".join(
-    f"""
-    <div class="stat-item">
-        <div class="stat-label">{label}</div>
-        <div class="stat-value">{regular_totals[label]:,.0f}</div>
-    </div>
-    """
-    for label in ["일반", "야간", "평일", "휴일"]
-)
-
-# 정기권/종일권 카드와 지도 패널의 높이를 전부 하나의 CSS 변수(--panel-h)에서 계산한다.
-# 뷰포트 높이(vh)를 기준으로 하되 너무 작아지거나 커지지 않게 clamp로 상하한을 둔다.
-# 세 영역이 같은 변수를 공유하므로 창 크기가 바뀌어도 서로 어긋나지 않고 함께 스케일된다.
 render_html(
     """
     <style>
-    :root { --panel-h: clamp(190px, 24vh, 300px); --panel-gap: 16px; }
-    .panel-box {
-        background:#1b1e24; border-radius:10px; box-sizing:border-box;
-        padding: clamp(14px, 1.8vw, 24px); height: var(--panel-h);
-        margin-bottom: var(--panel-gap); display:flex; flex-direction:column;
-    }
-    .panel-title { color:#9aa0a6; font-size: clamp(12px, 1vw, 15px); margin-bottom: 10px; text-align:center; }
-    .panel-row {
-        flex:1; min-height:0; display:flex; flex-wrap:wrap;
-        align-items:center; justify-content:space-around; gap: clamp(6px, 1.2vw, 18px) 24px;
-    }
-    .stat-item { text-align:center; }
-    .stat-label { color:#ccc; font-size: clamp(11px, 0.9vw, 14px); white-space:nowrap; }
-    .stat-value { color:#fff; font-weight:700; font-size: clamp(16px, 1.8vw, 26px); white-space:nowrap; }
     .map-panel {
         background:#1b1e24; border-radius:10px; overflow:hidden;
-        height: calc(var(--panel-h) * 2 + var(--panel-gap));
+        width: min(6cm, 100%); aspect-ratio: 1 / 1.8; margin: 0 auto;
     }
     .map-panel iframe { width:100%; height:100%; border:0; display:block; }
     .map-placeholder {
@@ -302,52 +293,88 @@ render_html(
         align-items:center; justify-content:center; text-align:center;
         color:#9aa0a6; font-size:13px; line-height:1.6;
     }
+    .stat-item { text-align:center; }
+    .stat-label { color:#ccc; font-size: clamp(12px, 1vw, 14px); white-space:nowrap; }
+    .stat-value { color:#fff; font-weight:700; font-size: clamp(18px, 2vw, 28px); white-space:nowrap; }
+    .stat-row {
+        display:flex; flex-wrap:wrap; align-items:center; justify-content:space-around;
+        gap: clamp(10px, 1.5vw, 20px) 28px; margin: 18px 0 30px;
+    }
+    .allday-grid { display:flex; flex-wrap:wrap; margin: 12px 0 28px; }
+    .allday-col { flex:1; min-width:220px; text-align:center; padding:0 24px; box-sizing:border-box; }
+    .allday-col + .allday-col { border-left:1px solid #2a2d35; }
+    .allday-heading { color:#9aa0a6; font-size: clamp(12px, 1vw, 14px); }
+    .allday-value { color:#fff; font-weight:800; font-size: clamp(24px, 2.4vw, 32px); margin:8px 0 18px; }
+    .allday-days {
+        display:flex; flex-wrap:wrap; justify-content:center;
+        gap: clamp(8px, 1.5vw, 18px) 20px; padding-top:14px; border-top:1px solid #2a2d35;
+    }
     </style>
     """
 )
 
-top_left, top_right = st.columns([19, 6])  # 기존 [4, 1](우측 20%) 대비 가로 1.2배(우측 24%)
+regular_totals = regular_stock_by_category(base_filtered)
+day_stock = {d: allday_stock_by_day(base_filtered, d) for d in ["월", "화", "수", "목", "금", "토", "일"]}
+weekday_avg = round((day_stock["월"] + day_stock["화"] + day_stock["수"] + day_stock["목"] + day_stock["금"]) / 5)
+weekend_avg = round((day_stock["토"] + day_stock["일"]) / 2)
 
-with top_left:
-    render_html(
-        f"""
-        <div class="panel-box">
-            <div class="panel-title">[정기권 재고 현황]</div>
-            <div class="panel-row">{regular_items_html}</div>
-        </div>
-        """
-    )
-    render_html(
-        f"""
-        <div class="panel-box" style="margin-bottom:0;">
-            <div class="panel-title">[종일권 재고 현황]</div>
-            <div class="panel-row">
-                <div class="stat-item">
-                    <div class="stat-label">평일 평균</div>
-                    <div class="stat-value">{weekday_avg:,.0f}</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">휴일 평균</div>
-                    <div class="stat-value">{weekend_avg:,.0f}</div>
-                </div>
-                {days_html}
-            </div>
-        </div>
-        """
-    )
+day_colors = {"월": "#eee", "화": "#eee", "수": "#eee", "목": "#eee", "금": "#eee", "토": "#5B9BD5", "일": "#E06666"}
+REGULAR_ICONS = {"일반": "🎫", "야간": "🌙", "평일": "💼", "휴일": "☀️"}
 
-with top_right:
-    render_modu_map_panel(site_selected, site_df)
+weekday_days_html = "".join(
+    f"""
+    <div class="stat-item">
+        <div class="stat-label" style="color:{day_colors[d]};">{d}</div>
+        <div class="stat-value" style="color:{day_colors[d]};">{day_stock[d]:,.0f}</div>
+    </div>
+    """
+    for d in ["월", "화", "수", "목", "금"]
+)
+weekend_days_html = "".join(
+    f"""
+    <div class="stat-item">
+        <div class="stat-label" style="color:{day_colors[d]};">{d}</div>
+        <div class="stat-value" style="color:{day_colors[d]};">{day_stock[d]:,.0f}</div>
+    </div>
+    """
+    for d in ["토", "일"]
+)
+
+regular_items_html = "".join(
+    f"""
+    <div class="stat-item">
+        <div class="stat-label">{REGULAR_ICONS[label]} {label}</div>
+        <div class="stat-value">{regular_totals[label]:,.0f}</div>
+    </div>
+    """
+    for label in ["일반", "야간", "평일", "휴일"]
+)
+
+st.subheader("정기권 재고 현황")
+render_html(f'<div class="stat-row">{regular_items_html}</div>')
+
+st.subheader("종일권 재고 현황")
+render_html(
+    f"""
+    <div class="allday-grid">
+        <div class="allday-col">
+            <div class="allday-heading">평일 평균 (월~금)</div>
+            <div class="allday-value">{weekday_avg:,.0f}</div>
+            <div class="allday-days">{weekday_days_html}</div>
+        </div>
+        <div class="allday-col">
+            <div class="allday-heading">휴일 평균 (토~일)</div>
+            <div class="allday-value">{weekend_avg:,.0f}</div>
+            <div class="allday-days">{weekend_days_html}</div>
+        </div>
+    </div>
+    """
+)
 
 st.divider()
 st.subheader("플랫폼별 상품 비교")
 
 display_df = filtered.sort_values(["pjt_code", "ticket_type_rank", "rank"]).reset_index(drop=True).copy()
-
-same_site = display_df["pjt_code"] == display_df["pjt_code"].shift(1)
-same_ticket = same_site & (display_df["ticket_type"] == display_df["ticket_type"].shift(1))
-display_df.loc[same_site, "site_name"] = ""
-display_df.loc[same_ticket, "ticket_type"] = ""
 
 
 def fmt_num(x):
@@ -365,33 +392,57 @@ def esc(v):
     return html.escape(str(v)) if v != "" else ""
 
 
+# 동일 (현장, ticket_type) 그룹은 rowspan으로 한 번만 표시하고, 그룹이 바뀔 때만
+# 구분선을 그려서 이미지처럼 그룹 단위로 깔끔하게 묶인 표를 만든다.
+site_group_sizes = display_df.groupby("pjt_code")["pjt_code"].transform("size")
+tt_group_sizes = display_df.groupby(["pjt_code", "ticket_type"])["ticket_type"].transform("size")
+prev_pjt = display_df["pjt_code"].shift(1)
+prev_tt = display_df["ticket_type"].shift(1)
+is_site_first = display_df["pjt_code"] != prev_pjt
+is_tt_first = is_site_first | (display_df["ticket_type"] != prev_tt)
+
 body_rows = []
-for _, row in display_df.iterrows():
-    cells = "".join(
-        f"<td>{esc(row[c])}</td>"
-        for c in [
-            "site_name",
-            "ticket_type",
-            "kakao_product_name",
-            "kakao_price",
-            "kakao_stock",
-            "modu_product_name",
-            "modu_price",
-            "modu_stock",
-        ]
+for idx, row in display_df.iterrows():
+    cells = []
+    if show_site_col and is_site_first.loc[idx]:
+        cells.append(
+            f'<td rowspan="{int(site_group_sizes.loc[idx])}" class="group-cell">{esc(row["site_name"])}</td>'
+        )
+
+    tt_first = bool(is_tt_first.loc[idx])
+    row_cls = ' class="group-start"' if tt_first else ""
+
+    if tt_first:
+        cells.append(
+            f'<td rowspan="{int(tt_group_sizes.loc[idx])}" class="group-cell">{esc(row["ticket_type"])}</td>'
+        )
+
+    is_empty_group = (
+        tt_first and int(tt_group_sizes.loc[idx]) == 1
+        and row["kakao_product_name"] == "" and row["modu_product_name"] == ""
     )
-    body_rows.append(f"<tr>{cells}</tr>")
+    if is_empty_group:
+        cells.append('<td colspan="6" class="no-data-cell">데이터 없음</td>')
+    else:
+        for c in ["kakao_product_name", "kakao_price", "kakao_stock",
+                  "modu_product_name", "modu_price", "modu_stock"]:
+            cells.append(f"<td>{esc(row[c])}</td>")
+
+    body_rows.append(f"<tr{row_cls}>{''.join(cells)}</tr>")
+
+basic_colspan = 2 if show_site_col else 1
+site_header = "<th>현장명</th>" if show_site_col else ""
 
 table_html = (
     '<table class="compare-table">'
     "<thead>"
     "<tr>"
-    '<th colspan="2" class="grp-basic">기본정보</th>'
-    '<th colspan="3" class="grp-kakao">카카오T</th>'
-    '<th colspan="3" class="grp-modu">모두의주차장</th>'
+    f'<th colspan="{basic_colspan}" class="grp-basic"></th>'
+    f'<th colspan="3" class="grp-kakao"><img src="{KAKAO_LOGO_URI}" class="brand-logo"/>카카오T</th>'
+    f'<th colspan="3" class="grp-modu"><img src="{MODU_LOGO_URI}" class="brand-logo brand-logo-modu"/>모두의주차장</th>'
     "</tr>"
     "<tr>"
-    "<th>현장명</th><th>상품종류</th>"
+    f"{site_header}<th>상품종류</th>"
     "<th>상품명</th><th>가격</th><th>재고</th>"
     "<th>상품명</th><th>가격</th><th>재고</th>"
     "</tr>"
@@ -405,11 +456,16 @@ render_html(
     <style>
     .compare-table-wrap { max-height: 960px; overflow-y: auto; border: 1px solid #2a2d35; border-radius: 6px; }
     table.compare-table { border-collapse: collapse; width: 100%; font-size: 14px; color: #ddd; }
-    table.compare-table th.grp-basic { background:#555; color:#fff; padding:8px 12px; position:sticky; top:0; z-index:2; }
-    table.compare-table th.grp-kakao { background:#FEE500; color:navy; padding:8px 12px; position:sticky; top:0; z-index:2; }
-    table.compare-table th.grp-modu { background:#2AA9E0; color:#fff; padding:8px 12px; position:sticky; top:0; z-index:2; }
-    table.compare-table thead tr:nth-child(2) th { background:#262a33; color:#ddd; padding:6px 12px; font-weight:600; text-align:left; position:sticky; top:32px; z-index:2; }
+    table.compare-table th.grp-basic { background:transparent; padding:8px 12px; position:sticky; top:0; z-index:2; }
+    table.compare-table th.grp-kakao { background:#F6E4C6; color:#3a2a10; padding:8px 12px; position:sticky; top:0; z-index:2; }
+    table.compare-table th.grp-modu { background:#D6EAFB; color:#0d3a5c; padding:8px 12px; position:sticky; top:0; z-index:2; }
+    table.compare-table .brand-logo { height:16px; width:auto; vertical-align:middle; margin-right:6px; }
+    table.compare-table .brand-logo-modu { height:20px; border-radius:4px; }
+    table.compare-table thead tr:nth-child(2) th { background:#262a33; color:#ddd; padding:6px 12px; font-weight:600; text-align:left; position:sticky; top:36px; z-index:2; }
     table.compare-table td { text-align:left; padding:6px 12px; border:none; }
+    table.compare-table td.group-cell { font-weight:600; vertical-align:middle; }
+    table.compare-table td.no-data-cell { color:#7a8087; text-align:center; }
+    table.compare-table tr.group-start td { border-top:1px solid #2a2d35; }
     table.compare-table tbody tr:hover { background-color: rgba(255,255,255,0.05); }
     </style>
     """
@@ -419,23 +475,8 @@ render_html(f'<div class="compare-table-wrap">{table_html}</div>')
 st.divider()
 st.subheader("상품종류별 플랫폼 재고 비중")
 
-PLATFORM_SLICE_COLOR = {"카카오T": "#001F54", "모두의주차장": "#2AA9E0"}
-PLATFORM_TEXT_COLOR = {"카카오T": "#FEE500", "모두의주차장": "#FFFFFF"}
+PLATFORM_SLICE_COLOR = {"카카오T": "#FFA94D", "모두의주차장": "#3B9EFF"}
 
-render_html(
-    f"""
-    <div style="display:flex;justify-content:center;gap:32px;margin-bottom:12px;">
-        <div style="display:flex;align-items:center;gap:8px;">
-            <span style="width:14px;height:14px;background:{PLATFORM_SLICE_COLOR['카카오T']};border-radius:3px;display:inline-block;"></span>
-            <span style="color:#ddd;font-size:14px;">카카오T</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-            <span style="width:14px;height:14px;background:{PLATFORM_SLICE_COLOR['모두의주차장']};border-radius:3px;display:inline-block;"></span>
-            <span style="color:#ddd;font-size:14px;">모두의주차장</span>
-        </div>
-    </div>
-    """
-)
 
 def ticket_type_sort_key(tt):
     return (TICKET_TYPE_ORDER.index(tt) if tt in TICKET_TYPE_ORDER else len(TICKET_TYPE_ORDER), tt)
@@ -450,33 +491,57 @@ for tt in ticket_types:
     if kakao_sum + modu_sum > 0:
         plat_totals.append((tt, kakao_sum, modu_sum))
 
-if plat_totals:
-    cols = st.columns(len(plat_totals), gap="medium")
-    for col, (tt, kakao_sum, modu_sum) in zip(cols, plat_totals):
-        plat_df = pd.DataFrame({"플랫폼": ["카카오T", "모두의주차장"], "재고": [kakao_sum, modu_sum]})
-        fig = px.pie(
-            plat_df,
-            names="플랫폼",
-            values="재고",
-            hole=0.4,
-            color="플랫폼",
-            color_discrete_map=PLATFORM_SLICE_COLOR,
-        )
-        fig.update_traces(
-            textinfo="percent+value",
-            textfont=dict(color=[PLATFORM_TEXT_COLOR[p] for p in plat_df["플랫폼"]]),
-            hovertemplate="%{label}<br>재고 합계: %{value:,.0f}<br>비중: %{percent}<extra></extra>",
-        )
-        fig.update_layout(
-            title=dict(text=tt, x=0.5, xanchor="center"),
-            showlegend=False,
-            height=320,
-            margin=dict(t=40, b=40, l=20, r=20),
-        )
-        with col:
-            st.plotly_chart(fig, use_container_width=True)
-else:
-    st.caption("표시할 재고 데이터가 없습니다.")
+# 모두의주차장 지도는 상품종류별 재고 비중(도넛 차트)과 나란히 배치한다.
+donut_col, map_col = st.columns([5, 2])
+
+with donut_col:
+    render_html(
+        f"""
+        <div style="display:flex;justify-content:center;gap:32px;margin-bottom:12px;align-items:center;">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span style="width:12px;height:12px;background:{PLATFORM_SLICE_COLOR['카카오T']};border-radius:50%;display:inline-block;"></span>
+                <span style="color:#ddd;font-size:14px;">카카오T</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span style="width:12px;height:12px;background:{PLATFORM_SLICE_COLOR['모두의주차장']};border-radius:50%;display:inline-block;"></span>
+                <span style="color:#ddd;font-size:14px;">모두의주차장</span>
+            </div>
+        </div>
+        """
+    )
+
+    if plat_totals:
+        cols = st.columns(len(plat_totals), gap="medium")
+        for col, (tt, kakao_sum, modu_sum) in zip(cols, plat_totals):
+            plat_df = pd.DataFrame({"플랫폼": ["카카오T", "모두의주차장"], "재고": [kakao_sum, modu_sum]})
+            fig = px.pie(
+                plat_df,
+                names="플랫폼",
+                values="재고",
+                hole=0.55,
+                color="플랫폼",
+                color_discrete_map=PLATFORM_SLICE_COLOR,
+            )
+            fig.update_traces(
+                textinfo="none",
+                hovertemplate="%{label}<br>재고 합계: %{value:,.0f}<br>비중: %{percent}<extra></extra>",
+            )
+            fig.update_layout(showlegend=False, height=180, margin=dict(t=10, b=10, l=10, r=10))
+            with col:
+                st.plotly_chart(fig, use_container_width=True)
+                render_html(
+                    f"""
+                    <div style="text-align:center;margin-top:-8px;">
+                        <div style="color:#ddd;font-size:14px;font-weight:600;">{tt}</div>
+                        <div style="color:#9aa0a6;font-size:13px;">{kakao_sum:,.0f} · {modu_sum:,.0f}</div>
+                    </div>
+                    """
+                )
+    else:
+        st.caption("표시할 재고 데이터가 없습니다.")
+
+with map_col:
+    render_modu_map_panel(site_selected, site_df)
 
 if site_selected != "전체":
     st.divider()
