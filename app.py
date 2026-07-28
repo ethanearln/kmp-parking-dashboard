@@ -321,7 +321,12 @@ render_html(
         background: var(--surface-1); border-radius: var(--radius); overflow:hidden;
         width: var(--map-w); height: var(--map-h); flex: none; margin: 0 auto;
     }
-    .map-panel iframe { width:100%; height:100%; border:0; display:block; }
+    /* 모두의주차장 임베드는 배율 파라미터가 없어서, iframe을 142.857%(=100/0.7)로 키운 뒤
+       70%로 축소해 기본 대비 더 넓은 영역이 보이도록 한다. */
+    .map-panel iframe {
+        width:142.857%; height:142.857%; border:0; display:block;
+        transform: scale(0.7); transform-origin: top left;
+    }
     .map-placeholder {
         height:100%; box-sizing:border-box; padding:14px 17px; display:flex;
         align-items:center; justify-content:center; text-align:center;
