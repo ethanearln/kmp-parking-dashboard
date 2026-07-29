@@ -3,9 +3,11 @@ import html
 import math
 import os
 import re
+from datetime import date
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
@@ -89,39 +91,6 @@ def load_site_data():
     return client.query(query).to_dataframe()
 
 
-@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
-def load_kakao_products():
-    client = get_bigquery_client()
-    # 서비스 중 + 판매중인(현재 실제로 팔리고 있는) 상품만 대상으로 한다.
-    # 이렇게 하면 하나의 pjt_code에 카카오 연동이 여러 개 걸려 있어도
-    # 미사용/중지된 연동은 자연스럽게 제외되고 실제 운영 중인 연동만 남는다.
-    query = f"""
-        SELECT parking_lot_id, ticket_type, product_name,
-               base_price AS price, base_stock_qty AS stock, sales_days
-        FROM `{PROJECT}.db_platform_kakao.tb_product_data_kakao_recent`
-        WHERE service_status = '서비스 중' AND ticket_on_off = '판매중'
-    """
-    return client.query(query).to_dataframe()
-
-
-@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
-def load_modu_products():
-    client = get_bigquery_client()
-    query = f"""
-        SELECT parking_lot_id, ticket_type, ticket_name AS product_name,
-               price, limit_quantity AS stock, sales_days
-        FROM `{PROJECT}.db_platform_modu.tb_product_data_modu_recent`
-        WHERE sales_status = '판매중'
-    """
-    return client.query(query).to_dataframe()
-
-
-def _attach_pjt_code(products, site_df, id_col):
-    site_map = site_df[["pjt_code", id_col]].dropna(subset=[id_col]).drop_duplicates()
-    merged = products.merge(site_map, left_on="parking_lot_id", right_on=id_col, how="inner")
-    return merged.drop(columns=[id_col, "parking_lot_id"])
-
-
 def _rank_products(products):
     # 동일 (현장, ticket_type) 안에서 product_name 내림차순 -> price 내림차순으로 정렬한 뒤
     # 순번을 매겨 카카오T/모두의주차장 상품을 같은 줄에 나란히 비교할 수 있게 짝짓는다.
@@ -130,39 +99,27 @@ def _rank_products(products):
     return ranked
 
 
-@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
-def load_product_data():
-    site_df = load_site_data()
-
-    kakao = _attach_pjt_code(load_kakao_products(), site_df, "kakao_site_id")
-    modu = _attach_pjt_code(load_modu_products(), site_df, "modu_site_id")
-
-    for products in (kakao, modu):
-        products["ticket_type"] = products["ticket_type"].where(
-            products["ticket_type"].isin(TICKET_TYPE_ORDER), "미분류"
-        )
-
+def _pair_products(kakao, modu, site_attrs):
+    # kakao/modu 각각의 (현장, ticket_type)별 순번을 다시 매겨서 짝짓는다. "활성 상품만 보기"에서
+    # 비활성 상품을 아예 걸러내고 이 함수를 다시 돌리면, 남은 상품들끼리 순번이 당겨져서
+    # 짝이 맞지 않아 한쪽만 비는 행이 생기지 않는다.
     kakao_r = _rank_products(kakao)[
-        ["pjt_code", "ticket_type", "rank", "product_name", "price", "stock", "sales_days"]
+        ["pjt_code", "ticket_type", "rank", "product_id", "product_name", "price", "stock", "sales_days", "is_active"]
     ].rename(columns={
-        "product_name": "kakao_product_name", "price": "kakao_price",
-        "stock": "kakao_stock", "sales_days": "kakao_sales_days",
+        "product_id": "kakao_product_id", "product_name": "kakao_product_name", "price": "kakao_price",
+        "stock": "kakao_stock", "sales_days": "kakao_sales_days", "is_active": "kakao_is_active",
     })
     modu_r = _rank_products(modu)[
-        ["pjt_code", "ticket_type", "rank", "product_name", "price", "stock", "sales_days"]
+        ["pjt_code", "ticket_type", "rank", "product_id", "product_name", "price", "stock", "sales_days", "is_active"]
     ].rename(columns={
-        "product_name": "modu_product_name", "price": "modu_price",
-        "stock": "modu_stock", "sales_days": "modu_sales_days",
+        "product_id": "modu_product_id", "product_name": "modu_product_name", "price": "modu_price",
+        "stock": "modu_stock", "sales_days": "modu_sales_days", "is_active": "modu_is_active",
     })
 
     paired = pd.merge(kakao_r, modu_r, on=["pjt_code", "ticket_type", "rank"], how="outer")
 
     # pjt_code 는 중복 제거 없이 그대로 "존재하는 현장 목록"의 기준이 된다.
     # 상품이 있건 없건 모든 (현장, ticket_type) 조합이 노출되도록 스캐폴드를 만든다.
-    site_attrs = site_df.groupby("pjt_code", as_index=False).agg({
-        "site_name": "first", "operation_hq": "first", "operation_manager": "first",
-        "contract_type": "first", "spaces_count": "first",
-    })
     ticket_type_df = pd.DataFrame({"ticket_type": TICKET_TYPE_ORDER})
     scaffold = site_attrs[["pjt_code"]].merge(ticket_type_df, how="cross")
     scaffold["rank"] = 0
@@ -177,7 +134,50 @@ def load_product_data():
     return result
 
 
-df = load_product_data()
+@st.cache_data(ttl=86400)  # 원본 테이블은 하루 1회(UTC 01:00경) 갱신되므로 굳이 자주 재조회할 필요가 없다.
+def load_product_data():
+    client = get_bigquery_client()
+    query = f"""
+        SELECT project_code AS pjt_code, site_name, operation_hq, operation_manager,
+               contract_type, spaces_count, ticket_type, platform, product_id,
+               product_name, price, stock, sales_days, is_active
+        FROM `{PROJECT}.db_platform_kmp.tb_integrated_product_data`
+    """
+    long_df = client.query(query).to_dataframe()
+    long_df["ticket_type"] = long_df["ticket_type"].where(
+        long_df["ticket_type"].isin(TICKET_TYPE_ORDER), "미분류"
+    )
+
+    kakao = long_df[long_df["platform"] == "KAKAO"].copy()
+    modu = long_df[long_df["platform"] == "MODU"].copy()
+
+    site_attrs = long_df.groupby("pjt_code", as_index=False).agg({
+        "site_name": "first", "operation_hq": "first", "operation_manager": "first",
+        "contract_type": "first", "spaces_count": "first",
+    })
+
+    result = _pair_products(kakao, modu, site_attrs)
+    return result, kakao, modu, site_attrs
+
+
+@st.cache_data(ttl=3600)  # 기간을 자주 바꿔가며 조회하므로 상품/현장 데이터보다 짧은 TTL을 쓴다.
+def load_revenue_data(start_date, end_date):
+    client = get_bigquery_client()
+    query = f"""
+        SELECT project_code AS pjt_code, platform, product_id,
+               SUM(payment_count) AS revenue_count, SUM(payment_amount) AS revenue_amount
+        FROM `{PROJECT}.db_platform_kmp.tb_product_revenue`
+        WHERE revenue_date BETWEEN @start_date AND @end_date
+        GROUP BY pjt_code, platform, product_id
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("start_date", "DATE", start_date),
+        bigquery.ScalarQueryParameter("end_date", "DATE", end_date),
+    ])
+    return client.query(query, job_config=job_config).to_dataframe()
+
+
+df, kakao_products, modu_products, site_attrs_all = load_product_data()
 site_df = load_site_data()
 
 render_html(
@@ -196,10 +196,8 @@ render_html(
         --text-muted: #6b7280;
         --text-accent: #5B9BD5;
         --text-danger: #E06666;
-        --map-h: 15cm;
+        --map-h: 18cm;
         --map-w: 10cm;
-        --donut-d: 58px;
-        --donut-hole: 36px;
     }
     </style>
     """
@@ -212,10 +210,33 @@ hq_selected = st.sidebar.multiselect("운영본부", hq_options)
 
 df["site_label"] = df["site_name"] + " (" + df["pjt_code"] + ")"
 site_options = sorted(df["site_label"].dropna().unique())
-site_selected = st.sidebar.selectbox("현장명", ["전체"] + site_options)
+site_choices = ["전체"] + site_options
+# "전체"는 데이터량이 많아 표 렌더링이 느리므로, 첫 로딩이 빠르도록 특정 현장을 기본값으로 잡는다.
+DEFAULT_SITE_LABEL = "원센티널 (KMP9900198)"
+default_site_index = site_choices.index(DEFAULT_SITE_LABEL) if DEFAULT_SITE_LABEL in site_choices else 0
+site_selected = st.sidebar.selectbox("현장명", site_choices, index=default_site_index)
 
 ticket_options = sorted(df["ticket_type"].dropna().unique())
 ticket_selected = st.sidebar.multiselect("상품종류", ticket_options)
+
+st.sidebar.markdown("---")
+# 취소 버튼이 눌린 다음 리런에서, 체크박스 위젯이 생성되기 "전에" 값을 되돌려야 한다
+# (생성된 뒤에 같은 key의 session_state를 바꾸면 StreamlitAPIException이 발생함).
+if st.session_state.pop("_reset_revenue_period", False):
+    st.session_state["show_revenue_checkbox"] = False
+show_revenue = st.sidebar.checkbox("기간별 매출/건수 보기", key="show_revenue_checkbox")
+revenue_range = None
+if show_revenue:
+    _today = date.today()
+    revenue_range = st.sidebar.date_input(
+        "매출 조회 기간", value=(_today.replace(day=1), _today), max_value=_today
+    )
+    if st.sidebar.button("기간 선택 취소"):
+        st.session_state["_reset_revenue_period"] = True
+        st.rerun()
+show_revenue_cols = show_revenue and isinstance(revenue_range, tuple) and len(revenue_range) == 2
+
+active_only = st.sidebar.checkbox("활성(판매중) 상품만 보기", value=True)
 
 base_filtered = df.copy()
 if hq_selected:
@@ -226,6 +247,15 @@ if site_selected != "전체":
 filtered = base_filtered.copy()
 if ticket_selected:
     filtered = filtered[filtered["ticket_type"].isin(ticket_selected)]
+
+# 정기권/종일권 재고 현황, 상품종류별 재고 비중 3개 요약 섹션은 "활성 상품만 보기" 체크박스와
+# 무관하게 항상 활성(카카오)/판매중(모두) 상품만 집계한다 — 현재 시점 스냅샷으로 보기 위함.
+summary_base = base_filtered.copy()
+summary_base.loc[~summary_base["kakao_is_active"].fillna(False), ["kakao_product_name", "kakao_stock", "kakao_sales_days"]] = pd.NA
+summary_base.loc[~summary_base["modu_is_active"].fillna(False), ["modu_product_name", "modu_stock", "modu_sales_days"]] = pd.NA
+summary_filtered = summary_base.copy()
+if ticket_selected:
+    summary_filtered = summary_filtered[summary_filtered["ticket_type"].isin(ticket_selected)]
 
 show_site_col = site_selected == "전체"
 header_subtitle = (
@@ -332,6 +362,40 @@ render_html(
         align-items:center; justify-content:center; text-align:center;
         color: var(--text-secondary); font-size:13px; line-height:1.6;
     }
+    /* 정기권 재고 카드: 컨테이너 쿼리로 카드 자체의 가로(cqw)뿐 아니라 세로(cqh)도 함께
+       기준 삼아, 카드가 폭에 비해 낮아지는 경우(비율 조정 등)에도 글씨가 카드 높이를
+       넘어 아래 섹션과 겹치지 않도록 두 기준 중 더 작은 쪽으로 크기를 제한한다. */
+    .regular-stat-card {
+        container-type: size;
+        background:var(--surface-1); border-radius:var(--radius); padding:10px 12px;
+        height:100%; box-sizing:border-box; overflow:hidden;
+        display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
+    }
+    .regular-stat-head { display:flex; align-items:center; gap:6px; }
+    .regular-stat-head i { font-size:clamp(14px, min(16cqw, 20cqh), 22px); color:var(--text-secondary); }
+    /* Streamlit이 markdown 문단(p)에 자체 font-size 규칙을 걸어두고 있어, 단일 클래스
+       선택자(specificity가 낮음)로는 밀리는 경우가 있다. 부모 클래스를 덧붙여
+       specificity를 올려서 항상 우리 값이 이기도록 한다. */
+    .regular-stat-head .regular-stat-head-label { font-size:clamp(11px, min(12cqw, 15cqh), 14px); color:var(--text-muted); margin:0; white-space:nowrap; }
+    .regular-stat-card .regular-stat-value { font-size:clamp(18px, min(24cqw, 30cqh), 30px); font-weight:600; margin:0; color:var(--text-primary); line-height:1; }
+    /* 도넛 카드: 컨테이너 쿼리(가로 cqw/세로 cqh)로 카드 자체 크기를 기준 삼아 도넛
+       지름을 정하므로, 그리드가 카드를 키우면(비중 섹션 높이를 늘리면) 차트도 함께 커진다. */
+    .donut-card {
+        container-type: size;
+        background:var(--surface-1); border-radius:var(--radius); padding:6px 5px; text-align:center;
+        height:100%; box-sizing:border-box; display:flex; flex-direction:column; justify-content:center; overflow:hidden;
+    }
+    .donut-circle { width:min(78cqw, 62cqh); height:min(78cqw, 62cqh); border-radius:50%; margin:0 auto 5px; position:relative; flex:none; }
+    .donut-card .donut-card-title { font-size:clamp(10px, 13cqh, 15px); color:var(--text-secondary); margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .donut-card .donut-card-sub { font-size:clamp(8px, 9cqh, 11px); color:var(--text-muted); margin:2px 0 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    /* 종일권 평일/휴일 평균 박스: 컨테이너 쿼리(세로 cqh 기준)로 박스 높이가 늘어나면
+       숫자도 함께 커지게 한다. 가로(cqw)는 두 박스 폭이 5:2로 서로 달라 기준으로 쓰면
+       두 박스 글씨 크기가 어긋나 보이므로, 높이가 서로 같은 cqh를 기준으로 통일한다. */
+    .allday-box { container-type: size; background:var(--surface-1); border-radius:var(--radius); overflow:hidden; display:flex; flex-direction:column; }
+    .allday-box .allday-avg-label { font-size:clamp(12px, 9cqh, 16px); color:var(--text-muted); margin:0 0 3px; }
+    .allday-box .allday-avg-value { font-size:clamp(22px, 22cqh, 40px); font-weight:600; margin:0; color:var(--text-primary); }
+    .allday-box .allday-day-label { font-size:clamp(10px, 7cqh, 14px); margin:0 0 4px; }
+    .allday-box .allday-day-value { font-size:clamp(16px, 15cqh, 28px); font-weight:500; margin:0; color:var(--text-primary); }
     </style>
     """
 )
@@ -339,8 +403,8 @@ render_html(
 # 지도가 어떤 화면에서든 12cm x 20cm로 고정되므로, 같은 행에 놓이는 B구역 나머지
 # 요소들(정기권/종일권/도넛)도 뷰포트 비례(vh/vw) 대신 고정 px로 맞춰 지도 높이 안에
 # 항상 들어맞도록 한다.
-regular_totals = regular_stock_by_category(base_filtered)
-day_stock = {d: allday_stock_by_day(base_filtered, d) for d in ["월", "화", "수", "목", "금", "토", "일"]}
+regular_totals = regular_stock_by_category(summary_base)
+day_stock = {d: allday_stock_by_day(summary_base, d) for d in ["월", "화", "수", "목", "금", "토", "일"]}
 weekday_avg = round((day_stock["월"] + day_stock["화"] + day_stock["수"] + day_stock["목"] + day_stock["금"]) / 5)
 weekend_avg = round((day_stock["토"] + day_stock["일"]) / 2)
 
@@ -350,8 +414,8 @@ REGULAR_ICON_CLASS = {"일반": "ti-ticket", "야간": "ti-moon", "평일": "ti-
 weekday_days_html = "".join(
     f"""
     <div style="text-align:center">
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px">{d}</p>
-        <p style="font-size:17px;font-weight:500;margin:0;color:var(--text-primary)">{day_stock[d]:,.0f}</p>
+        <p class="allday-day-label" style="color:var(--text-muted)">{d}</p>
+        <p class="allday-day-value">{day_stock[d]:,.0f}</p>
     </div>
     """
     for d in ["월", "화", "수", "목", "금"]
@@ -359,8 +423,8 @@ weekday_days_html = "".join(
 weekend_days_html = "".join(
     f"""
     <div style="text-align:center">
-        <p style="font-size:12px;color:{WEEKEND_COLOR[d]};margin:0 0 4px">{d}</p>
-        <p style="font-size:17px;font-weight:500;margin:0;color:{WEEKEND_COLOR[d]}">{day_stock[d]:,.0f}</p>
+        <p class="allday-day-label" style="color:{WEEKEND_COLOR[d]}">{d}</p>
+        <p class="allday-day-value" style="color:{WEEKEND_COLOR[d]}">{day_stock[d]:,.0f}</p>
     </div>
     """
     for d in ["토", "일"]
@@ -368,12 +432,12 @@ weekend_days_html = "".join(
 
 regular_items_html = "".join(
     f"""
-    <div style="background:var(--surface-1);border-radius:var(--radius);padding:14px 12px;display:flex;align-items:center;gap:10px;height:100%;box-sizing:border-box">
-        <i class="ti {REGULAR_ICON_CLASS[label]}" style="font-size:22px;color:var(--text-secondary)" aria-hidden="true"></i>
-        <div>
-            <p style="font-size:13px;color:var(--text-muted);margin:0">{label}</p>
-            <p style="font-size:26px;font-weight:600;margin:0;color:var(--text-primary)">{regular_totals[label]:,.0f}</p>
+    <div class="regular-stat-card">
+        <div class="regular-stat-head">
+            <i class="ti {REGULAR_ICON_CLASS[label]}" aria-hidden="true"></i>
+            <p class="regular-stat-head-label">{label}</p>
         </div>
+        <p class="regular-stat-value">{regular_totals[label]:,.0f}</p>
     </div>
     """
     for label in ["일반", "야간", "평일", "휴일"]
@@ -388,29 +452,30 @@ def ticket_type_sort_key(tt):
     return (TICKET_TYPE_ORDER.index(tt) if tt in TICKET_TYPE_ORDER else len(TICKET_TYPE_ORDER), tt)
 
 
-ticket_types = sorted(filtered["ticket_type"].dropna().unique(), key=ticket_type_sort_key)
+ticket_types = sorted(summary_filtered["ticket_type"].dropna().unique(), key=ticket_type_sort_key)
 plat_totals = []
 for tt in ticket_types:
-    sub = filtered[filtered["ticket_type"] == tt]
+    sub = summary_filtered[summary_filtered["ticket_type"] == tt]
     kakao_sum = sub["kakao_stock"].fillna(0).sum()
     modu_sum = sub["modu_stock"].fillna(0).sum()
     if kakao_sum + modu_sum > 0:
         plat_totals.append((tt, kakao_sum, modu_sum))
 
-DONUT_OUTER_R_PX = 29  # --donut-d(58px) 반지름
-DONUT_HOLE_R_PX = 18  # --donut-hole(36px) 반지름
-DONUT_MID_R_PX = (DONUT_OUTER_R_PX + DONUT_HOLE_R_PX) / 2
+DONUT_HOLE_RATIO = 0.62  # 도넛 구멍 지름 / 바깥 지름 (기존 36px/58px 비율 유지)
+DONUT_MID_R_RATIO = (0.5 + DONUT_HOLE_RATIO / 2) / 2  # 라벨을 안쪽 테두리와 바깥 테두리 중간에 놓기 위한, 지름 대비 반지름 비율
 
 
 def _donut_pct_label(pct_value, mid_angle_deg, color):
     # mid_angle_deg: 12시 방향(0도)에서 시계방향으로 잰 슬라이스 중앙 각도.
+    # 차트 크기가 카드마다(컨테이너 쿼리로) 달라지므로, 위치는 px가 아니라 도넛 지름 대비
+    # 비율(%)로 계산해 어떤 크기에서도 항상 같은 상대 위치(안쪽/바깥 테두리 중간)에 오도록 한다.
     # transform은 위치 이동(translate)에만 쓰고 회전(rotate)은 걸지 않아 글자가 항상 수평을 유지한다.
     theta = math.radians(mid_angle_deg)
-    x = DONUT_MID_R_PX * math.sin(theta)
-    y = -DONUT_MID_R_PX * math.cos(theta)
+    x_pct = DONUT_MID_R_RATIO * math.sin(theta) * 100
+    y_pct = -DONUT_MID_R_RATIO * math.cos(theta) * 100
     return (
-        f'<span style="position:absolute;left:calc(50% + {x:.1f}px);top:calc(50% + {y:.1f}px);'
-        f'transform:translate(-50%,-50%);font-size:10px;font-weight:600;color:{color};'
+        f'<span style="position:absolute;left:calc(50% + {x_pct:.2f}%);top:calc(50% + {y_pct:.2f}%);'
+        f'transform:translate(-50%,-50%);font-size:clamp(8px,11cqw,11px);font-weight:600;color:{color};'
         f'white-space:nowrap;">{pct_value:.0f}%</span>'
     )
 
@@ -427,16 +492,17 @@ for tt, kakao_sum, modu_sum in plat_totals:
     if modu_sum > 0:
         pct_labels_html += _donut_pct_label(modu_pct, (kakao_pct + 100) / 2 / 100 * 360, "#ffffff")
 
+    hole_offset_pct = (100 - DONUT_HOLE_RATIO * 100) / 2
     donut_cards_html += f"""
-    <div style="background:var(--surface-1);border-radius:var(--radius);padding:6px 5px;text-align:center;height:100%;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;overflow:hidden">
-        <div style="width:var(--donut-d);height:var(--donut-d);border-radius:50%;margin:0 auto 5px;position:relative;flex:none">
+    <div class="donut-card">
+        <div class="donut-circle">
             <div style="width:100%;height:100%;border-radius:50%;
                         background:conic-gradient({PLATFORM_SLICE_COLOR['카카오T']} 0% {kakao_pct:.4f}%,{PLATFORM_SLICE_COLOR['모두의주차장']} {kakao_pct:.4f}% 100%)"></div>
-            <div style="position:absolute;top:calc((var(--donut-d) - var(--donut-hole)) / 2);left:calc((var(--donut-d) - var(--donut-hole)) / 2);width:var(--donut-hole);height:var(--donut-hole);border-radius:50%;background:var(--surface-1)"></div>
+            <div style="position:absolute;top:{hole_offset_pct:.2f}%;left:{hole_offset_pct:.2f}%;width:{DONUT_HOLE_RATIO*100:.2f}%;height:{DONUT_HOLE_RATIO*100:.2f}%;border-radius:50%;background:var(--surface-1)"></div>
             {pct_labels_html}
         </div>
-        <p style="font-size:12px;color:var(--text-secondary);margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{tt}</p>
-        <p style="font-size:9px;color:var(--text-muted);margin:2px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{kakao_sum:,.0f}건 · {modu_sum:,.0f}건</p>
+        <p class="donut-card-title">{tt}</p>
+        <p class="donut-card-sub">{kakao_sum:,.0f}건 · {modu_sum:,.0f}건</p>
     </div>
     """
 
@@ -454,30 +520,30 @@ donut_grid_inner = (
 
 b_left_html = f"""
 <div style="height:var(--map-h);display:flex;flex-direction:column;gap:12px">
-    <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+    <div style="flex:2;min-height:0;display:flex;flex-direction:column">
         {category_title("정기권 재고 현황")}
         <div style="flex:1;min-height:0;display:grid;grid-auto-rows:1fr;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px">{regular_items_html}</div>
     </div>
-    <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+    <div style="flex:3;min-height:0;display:flex;flex-direction:column">
         {category_title("종일권 재고 현황")}
         <div style="flex:1;min-height:0;display:flex;gap:8px">
-            <div style="flex:5;background:var(--surface-1);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column">
+            <div class="allday-box" style="flex:5">
                 <div style="padding:10px 12px;text-align:center;border-bottom:0.5px solid var(--border)">
-                    <p style="font-size:12px;color:var(--text-muted);margin:0 0 3px">평일 평균 (월~금)</p>
-                    <p style="font-size:21px;font-weight:600;margin:0;color:var(--text-primary)">{weekday_avg:,.0f}</p>
+                    <p class="allday-avg-label">평일 평균 (월~금)</p>
+                    <p class="allday-avg-value">{weekday_avg:,.0f}</p>
                 </div>
-                <div style="flex:1;min-height:0;display:grid;grid-template-columns:repeat(5,1fr);align-content:center;padding:8px 12px">{weekday_days_html}</div>
+                <div style="flex:1;min-height:0;display:grid;grid-template-columns:repeat(5,1fr);align-content:center;padding:8px 12px 20px">{weekday_days_html}</div>
             </div>
-            <div style="flex:2;background:var(--surface-1);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column">
+            <div class="allday-box" style="flex:2">
                 <div style="padding:10px 12px;text-align:center;border-bottom:0.5px solid var(--border)">
-                    <p style="font-size:12px;color:var(--text-muted);margin:0 0 3px">휴일 평균 (토~일)</p>
-                    <p style="font-size:21px;font-weight:600;margin:0;color:var(--text-primary)">{weekend_avg:,.0f}</p>
+                    <p class="allday-avg-label">휴일 평균 (토~일)</p>
+                    <p class="allday-avg-value">{weekend_avg:,.0f}</p>
                 </div>
-                <div style="flex:1;min-height:0;display:grid;grid-template-columns:repeat(2,1fr);align-content:center;padding:8px 12px">{weekend_days_html}</div>
+                <div style="flex:1;min-height:0;display:grid;grid-template-columns:repeat(2,1fr);align-content:center;padding:8px 12px 20px">{weekend_days_html}</div>
             </div>
         </div>
     </div>
-    <div style="flex:1;min-height:0;display:flex;flex-direction:column">
+    <div style="flex:5;min-height:0;display:flex;flex-direction:column">
         {category_title("상품종류별 플랫폼 재고 비중")}
         {donut_legend_html}
         <div style="flex:1;min-height:0;display:grid;grid-auto-rows:1fr;grid-template-columns:repeat(auto-fit,minmax(70px,1fr));gap:6px;overflow:hidden">{donut_grid_inner}</div>
@@ -493,9 +559,70 @@ render_html(
     f"</div>"
 )
 
+# 모두의주차장 지도(iframe) 안에서 드래그/줌으로 클릭하면 포커스가 그 iframe으로 넘어가면서
+# 브라우저가 자동으로 페이지를 맨 위로 스크롤시켜버리는 경우가 있다. components.html은
+# 실제 <script>를 실행할 수 있는 유일한 방법이라 여기서 스크롤 위치를 저장해뒀다가
+# 포커스가 빠져나가는 순간(window.parent의 blur) 즉시 복원한다.
+components.html(
+    """
+    <script>
+    (function() {
+        try {
+            var top = window.parent;
+            if (top.__moduMapScrollFixInstalled) return;
+            top.__moduMapScrollFixInstalled = true;
+            var mainEl = top.document.querySelector('[data-testid="stMain"]');
+            if (!mainEl) return;
+            var lastTop = mainEl.scrollTop;
+            mainEl.addEventListener('scroll', function () { lastTop = mainEl.scrollTop; }, { passive: true });
+            top.addEventListener('blur', function () {
+                requestAnimationFrame(function () {
+                    requestAnimationFrame(function () { mainEl.scrollTop = lastTop; });
+                });
+            });
+        } catch (e) {}
+    })();
+    </script>
+    """,
+    height=0,
+    width=0,
+)
+
 render_html(category_title("플랫폼별 상품 비교", top_gap="36px"))
 
-display_df = filtered.sort_values(["pjt_code", "ticket_type_rank", "rank"]).reset_index(drop=True).copy()
+if active_only:
+    # 비활성 상품을 blank 처리만 하면 한쪽만 비어 행이 쪼그라들어 보이므로, 아예 제외한 뒤
+    # 남은 활성 상품들끼리 순번을 다시 매겨(_pair_products) 짝짓는다.
+    selected_pjt_codes = base_filtered["pjt_code"].unique()
+    kakao_active = kakao_products[
+        kakao_products["pjt_code"].isin(selected_pjt_codes) & kakao_products["is_active"].fillna(False)
+    ]
+    modu_active = modu_products[
+        modu_products["pjt_code"].isin(selected_pjt_codes) & modu_products["is_active"].fillna(False)
+    ]
+    site_attrs_scope = site_attrs_all[site_attrs_all["pjt_code"].isin(selected_pjt_codes)]
+    display_source = _pair_products(kakao_active, modu_active, site_attrs_scope)
+    if ticket_selected:
+        display_source = display_source[display_source["ticket_type"].isin(ticket_selected)]
+else:
+    display_source = filtered
+
+display_df = display_source.sort_values(["pjt_code", "ticket_type_rank", "rank"]).reset_index(drop=True).copy()
+
+if show_revenue_cols:
+    revenue_df = load_revenue_data(revenue_range[0], revenue_range[1])
+    kakao_rev = revenue_df[revenue_df["platform"] == "KAKAO"][
+        ["pjt_code", "product_id", "revenue_amount", "revenue_count"]
+    ].rename(columns={
+        "product_id": "kakao_product_id", "revenue_amount": "kakao_revenue_amount", "revenue_count": "kakao_revenue_count",
+    })
+    modu_rev = revenue_df[revenue_df["platform"] == "MODU"][
+        ["pjt_code", "product_id", "revenue_amount", "revenue_count"]
+    ].rename(columns={
+        "product_id": "modu_product_id", "revenue_amount": "modu_revenue_amount", "revenue_count": "modu_revenue_count",
+    })
+    display_df = display_df.merge(kakao_rev, on=["pjt_code", "kakao_product_id"], how="left")
+    display_df = display_df.merge(modu_rev, on=["pjt_code", "modu_product_id"], how="left")
 
 
 def fmt_num(x):
@@ -504,6 +631,10 @@ def fmt_num(x):
 
 for col in ["kakao_price", "kakao_stock", "modu_price", "modu_stock"]:
     display_df[col] = display_df[col].apply(fmt_num)
+
+if show_revenue_cols:
+    for col in ["kakao_revenue_amount", "kakao_revenue_count", "modu_revenue_amount", "modu_revenue_count"]:
+        display_df[col] = display_df[col].apply(fmt_num)
 
 for col in ["kakao_product_name", "modu_product_name", "kakao_sales_days", "modu_sales_days"]:
     display_df[col] = display_df[col].fillna("")
@@ -525,6 +656,13 @@ prev_tt = display_df["ticket_type"].shift(1)
 is_site_first = display_df["pjt_code"] != prev_pjt
 is_tt_first = is_site_first | (display_df["ticket_type"] != prev_tt)
 
+kakao_cols = ["kakao_product_name", "kakao_sales_days", "kakao_price", "kakao_stock"]
+modu_cols = ["modu_product_name", "modu_sales_days", "modu_price", "modu_stock"]
+if show_revenue_cols:
+    kakao_cols += ["kakao_revenue_amount", "kakao_revenue_count"]
+    modu_cols += ["modu_revenue_amount", "modu_revenue_count"]
+n_platform_cols = len(kakao_cols)
+
 body_rows = []
 for idx, row in display_df.iterrows():
     tt_first = bool(is_tt_first.loc[idx])
@@ -543,41 +681,57 @@ for idx, row in display_df.iterrows():
 
     if both_missing:
         if tt_first:
-            cells.append('<td colspan="8"></td>')
+            cells.append(f'<td colspan="{n_platform_cols * 2}"></td>')
             body_rows.append(f"<tr{row_cls}>{''.join(cells)}</tr>")
         continue
 
-    for side_has, cols in [
-        (kakao_has, ["kakao_product_name", "kakao_sales_days", "kakao_price", "kakao_stock"]),
-        (modu_has, ["modu_product_name", "modu_sales_days", "modu_price", "modu_stock"]),
-    ]:
+    for side_has, cols in [(kakao_has, kakao_cols), (modu_has, modu_cols)]:
         if side_has:
             for c in cols:
                 cells.append(f"<td>{esc(row[c])}</td>")
         elif tt_first:
-            cells.append('<td class="dash-cell">-</td><td></td><td></td><td></td>')
+            cells.append('<td class="dash-cell">-</td>' + "<td></td>" * (n_platform_cols - 1))
         else:
-            cells.append("<td></td><td></td><td></td><td></td>")
+            cells.append("<td></td>" * n_platform_cols)
 
     body_rows.append(f"<tr{row_cls}>{''.join(cells)}</tr>")
 
 basic_colspan = 2 if show_site_col else 1
 site_header = "<th>현장명</th>" if show_site_col else ""
+platform_header_extra = "<th>매출액</th><th>건수</th>" if show_revenue_cols else ""
 
-table_html = (
+# 헤더 표와 본문 표를 완전히 분리된 두 개의 <table>로 만들어서(스크롤은 본문에만 적용),
+# sticky 헤더 방식에서 나타나던 스크롤 시 겹침/간섭 현상을 없앤다. 두 표가 같은 colgroup을
+# 공유해야 컬럼 폭이 서로 어긋나지 않는다.
+if show_revenue_cols:
+    per_platform_widths = [15, 8, 6, 5, 6, 3] if show_site_col else [16, 9, 7, 5, 7, 3]
+    lead_widths = [9, 5] if show_site_col else [6]
+else:
+    per_platform_widths = [18, 10, 8, 6] if show_site_col else [20, 11, 9, 6]
+    lead_widths = [10, 6] if show_site_col else [8]
+col_widths = lead_widths + per_platform_widths * 2
+colgroup_html = "<colgroup>" + "".join(f'<col style="width:{w}%">' for w in col_widths) + "</colgroup>"
+
+header_table_html = (
     '<table class="compare-table">'
+    + colgroup_html +
     "<thead>"
     "<tr>"
     f'<th colspan="{basic_colspan}" class="grp-basic"></th>'
-    f'<th colspan="4" class="grp-kakao"><img src="{KAKAO_LOGO_URI}" class="brand-logo"/>카카오T</th>'
-    f'<th colspan="4" class="grp-modu"><img src="{MODU_LOGO_URI}" class="brand-logo brand-logo-modu"/>모두의주차장</th>'
+    f'<th colspan="{n_platform_cols}" class="grp-kakao"><img src="{KAKAO_LOGO_URI}" class="brand-logo"/>카카오T</th>'
+    f'<th colspan="{n_platform_cols}" class="grp-modu"><img src="{MODU_LOGO_URI}" class="brand-logo brand-logo-modu"/>모두의주차장</th>'
     "</tr>"
     "<tr>"
     f"{site_header}<th>상품종류</th>"
-    "<th>상품명</th><th>요일</th><th>가격</th><th>재고</th>"
-    "<th>상품명</th><th>요일</th><th>가격</th><th>재고</th>"
+    f"<th>상품명</th><th>요일</th><th>가격</th><th>재고</th>{platform_header_extra}"
+    f"<th>상품명</th><th>요일</th><th>가격</th><th>재고</th>{platform_header_extra}"
     "</tr>"
     "</thead>"
+    "</table>"
+)
+body_table_html = (
+    '<table class="compare-table">'
+    + colgroup_html +
     f"<tbody>{''.join(body_rows)}</tbody>"
     "</table>"
 )
@@ -585,15 +739,19 @@ table_html = (
 render_html(
     """
     <style>
-    .compare-table-wrap { max-height: 960px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
-    table.compare-table { border-collapse: collapse; width: 100%; font-size: 14px; color: var(--text-primary); }
-    table.compare-table th.grp-basic { background:transparent; padding:8px 12px; position:sticky; top:0; z-index:2; }
-    table.compare-table th.grp-kakao { background:#FAEEDA; color:#412402; padding:8px 12px; position:sticky; top:0; z-index:2; font-weight:500; }
-    table.compare-table th.grp-modu { background:#E6F1FB; color:#042C53; padding:8px 12px; position:sticky; top:0; z-index:2; font-weight:500; }
+    .compare-table-wrap { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+    .compare-table-wrap table { margin: 0 !important; }
+    .compare-table-body-wrap { max-height: 900px; overflow-y: auto; display: block; }
+    /* 고정 px 대신 뷰포트 폭에 비례하는 글씨 크기를 써서, 브라우저 확대/축소로 실질 뷰포트
+       폭이 줄어들 때 텍스트가 두 줄로 밀리거나 "..."로 잘리는 대신 글씨가 함께 작아지게 한다. */
+    table.compare-table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: clamp(10px, 0.85vw, 14px); color: var(--text-primary); }
+    table.compare-table th.grp-basic { background:var(--surface-1); padding:8px 12px; }
+    table.compare-table th.grp-kakao { background:#FAEEDA; color:#412402; padding:8px 12px; font-weight:500; }
+    table.compare-table th.grp-modu { background:#E6F1FB; color:#042C53; padding:8px 12px; font-weight:500; }
     table.compare-table .brand-logo { height:16px; width:auto; vertical-align:middle; margin-right:6px; }
     table.compare-table .brand-logo-modu { height:20px; border-radius:4px; }
-    table.compare-table thead tr:nth-child(2) th { background:var(--surface-1); color:var(--text-secondary); padding:6px 12px; font-weight:500; text-align:left; position:sticky; top:36px; z-index:2; }
-    table.compare-table td { text-align:left; padding:6px 12px; border:none; }
+    table.compare-table thead tr:nth-child(2) th { background:var(--surface-1); color:var(--text-secondary); padding:6px 12px; font-weight:500; text-align:left; }
+    table.compare-table td { text-align:left; padding:6px 12px; border:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     table.compare-table td.group-cell { font-weight:600; vertical-align:middle; }
     table.compare-table td.no-data-label { color:var(--text-muted); }
     table.compare-table td.dash-cell { color:var(--text-muted); }
@@ -602,7 +760,10 @@ render_html(
     </style>
     """
 )
-render_html(f'<div class="compare-table-wrap">{table_html}</div>')
+render_html(
+    f'<div class="compare-table-wrap">{header_table_html}'
+    f'<div class="compare-table-body-wrap">{body_table_html}</div></div>'
+)
 
 if site_selected != "전체":
     render_html(category_title("현장 기본 정보", top_gap="36px"))
@@ -611,21 +772,10 @@ if site_selected != "전체":
     if not site_info.empty:
         info = site_info.iloc[0]
 
-        def _first_valid_id(series):
-            valid = series.dropna()
-            valid = valid[valid.astype(str).str.strip() != ""]
-            return valid.iloc[0] if not valid.empty else None
-
-        # 하나의 pjt_code에 site 행이 여러 개 붙어있을 수 있어(예: 미사용 연동이 남은 행),
-        # 연동 ID는 첫 행이 아니라 값이 있는 행을 우선으로 가져온다.
-        site_ids = ", ".join(
-            str(v) for v in [
-                _first_valid_id(site_info["kakao_site_id"]),
-                _first_valid_id(site_info["modu_site_id"]),
-            ] if v is not None
-        )
         open_date = info["open_date"]
         open_date_str = "" if pd.isna(open_date) else str(open_date)
+        close_date = info["close_date"]
+        close_date_str = "" if pd.isna(close_date) else str(close_date)
 
         render_html(
             f"""
@@ -634,9 +784,9 @@ if site_selected != "전체":
                 <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">현장명</th>
                 <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">운영담당</th>
                 <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">계약유형</th>
-                <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">구획수</th>
-                <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">개장일</th>
-                <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">연동 ID</th>
+                <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">면수</th>
+                <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">오픈일</th>
+                <th style="text-align:left;padding:8px 6px;color:var(--text-primary);font-weight:500">폐점일</th>
             </tr></thead>
             <tbody><tr>
                 <td style="padding:8px 6px">{esc(info["site_name"]) if pd.notna(info["site_name"]) else ""}</td>
@@ -644,7 +794,7 @@ if site_selected != "전체":
                 <td style="padding:8px 6px">{esc(info["contract_type"]) if pd.notna(info["contract_type"]) else ""}</td>
                 <td style="padding:8px 6px">{fmt_num(info["spaces_count"])}</td>
                 <td style="padding:8px 6px">{esc(open_date_str)}</td>
-                <td style="padding:8px 6px;color:var(--text-muted);font-size:12px">{esc(site_ids)}</td>
+                <td style="padding:8px 6px">{esc(close_date_str)}</td>
             </tr></tbody>
             </table>
             """
