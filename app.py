@@ -198,6 +198,7 @@ render_html(
         --text-danger: #E06666;
         --map-h: 18cm;
         --map-w: 10cm;
+        --stat-value-size: 24px;
     }
     </style>
     """
@@ -377,7 +378,11 @@ render_html(
        선택자(specificity가 낮음)로는 밀리는 경우가 있다. 부모 클래스를 덧붙여
        specificity를 올려서 항상 우리 값이 이기도록 한다. */
     .regular-stat-head .regular-stat-head-label { font-size:clamp(11px, min(12cqw, 15cqh), 14px); color:var(--text-muted); margin:0; white-space:nowrap; }
-    .regular-stat-card .regular-stat-value { font-size:clamp(18px, min(24cqw, 30cqh), 30px); font-weight:600; margin:0; color:var(--text-primary); line-height:1; }
+    /* 정기권 카드 수치와 종일권 평일/휴일 평균 수치는 같은 크기로 보여야 해서, 서로 다른
+       컨테이너(카드 크기)를 기준으로 한 상대 단위 대신 고정 크기를 공유해서 쓴다.
+       --map-h가 뷰포트와 무관한 고정 물리 길이(cm)라 이 값도 고정해도 반응형이 깨지지
+       않고, 더 작은 정기권 카드 쪽 높이에 맞춰뒀기 때문에 카드를 벗어나지 않는다. */
+    .regular-stat-card .regular-stat-value { font-size:var(--stat-value-size); font-weight:600; margin:0; color:var(--text-primary); line-height:1; }
     /* 도넛 카드: 컨테이너 쿼리(가로 cqw/세로 cqh)로 카드 자체 크기를 기준 삼아 도넛
        지름을 정하므로, 그리드가 카드를 키우면(비중 섹션 높이를 늘리면) 차트도 함께 커진다. */
     .donut-card {
@@ -393,7 +398,7 @@ render_html(
        두 박스 글씨 크기가 어긋나 보이므로, 높이가 서로 같은 cqh를 기준으로 통일한다. */
     .allday-box { container-type: size; background:var(--surface-1); border-radius:var(--radius); overflow:hidden; display:flex; flex-direction:column; }
     .allday-box .allday-avg-label { font-size:clamp(12px, 9cqh, 16px); color:var(--text-muted); margin:0 0 3px; }
-    .allday-box .allday-avg-value { font-size:clamp(22px, 22cqh, 40px); font-weight:600; margin:0; color:var(--text-primary); }
+    .allday-box .allday-avg-value { font-size:var(--stat-value-size); font-weight:600; margin:0; color:var(--text-primary); }
     .allday-box .allday-day-label { font-size:clamp(10px, 7cqh, 14px); margin:0 0 4px; }
     .allday-box .allday-day-value { font-size:clamp(16px, 15cqh, 28px); font-weight:500; margin:0; color:var(--text-primary); }
     </style>
