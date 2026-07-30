@@ -668,6 +668,19 @@ if show_revenue_cols:
     modu_cols += ["modu_revenue_amount", "modu_revenue_count"]
 n_platform_cols = len(kakao_cols)
 
+# 가격/재고/매출액/건수는 숫자라 우측 정렬(num-cell)한다. 매출액은 그 앞의 재고 컬럼과
+# 성격이 다른 데이터(상품 마스터 정보 vs 기간별 매출 집계)라 세로 구분선(rev-cell)도 준다.
+COL_CELL_CLASS = {
+    "kakao_price": "num-cell", "kakao_stock": "num-cell",
+    "modu_price": "num-cell", "modu_stock": "num-cell",
+    "kakao_revenue_amount": "num-cell rev-cell", "kakao_revenue_count": "num-cell",
+    "modu_revenue_amount": "num-cell rev-cell", "modu_revenue_count": "num-cell",
+}
+
+# 상품종류(정기권/종일권/...) 그룹마다 한 줄씩 건너뛰며 옅은 배경을 줘서, 표가 길어져도
+# 어디까지가 같은 그룹인지 한눈에 구분되게 한다.
+group_number = is_tt_first.cumsum()
+
 body_rows = []
 for idx, row in display_df.iterrows():
     tt_first = bool(is_tt_first.loc[idx])
@@ -675,7 +688,10 @@ for idx, row in display_df.iterrows():
     kakao_has = bool(kakao_group_has.loc[idx])
     modu_has = bool(modu_group_has.loc[idx])
     both_missing = not kakao_has and not modu_has
-    row_cls = ' class="group-start"' if tt_first else ""
+    row_cls_parts = (["group-start"] if tt_first else []) + (
+        ["zebra-alt"] if int(group_number.loc[idx]) % 2 == 1 else []
+    )
+    row_cls = f' class="{" ".join(row_cls_parts)}"' if row_cls_parts else ""
 
     cells = []
     if show_site_col:
@@ -693,7 +709,8 @@ for idx, row in display_df.iterrows():
     for side_has, cols in [(kakao_has, kakao_cols), (modu_has, modu_cols)]:
         if side_has:
             for c in cols:
-                cells.append(f"<td>{esc(row[c])}</td>")
+                cls = COL_CELL_CLASS.get(c, "")
+                cells.append(f'<td class="{cls}">{esc(row[c])}</td>' if cls else f"<td>{esc(row[c])}</td>")
         elif tt_first:
             cells.append('<td class="dash-cell">-</td>' + "<td></td>" * (n_platform_cols - 1))
         else:
@@ -703,19 +720,27 @@ for idx, row in display_df.iterrows():
 
 basic_colspan = 2 if show_site_col else 1
 site_header = "<th>현장명</th>" if show_site_col else ""
-platform_header_extra = "<th>매출액</th><th>건수</th>" if show_revenue_cols else ""
+platform_header_extra = (
+    '<th class="num-cell rev-cell">매출액</th><th class="num-cell">건수</th>' if show_revenue_cols else ""
+)
 
 # 헤더 표와 본문 표를 완전히 분리된 두 개의 <table>로 만들어서(스크롤은 본문에만 적용),
 # sticky 헤더 방식에서 나타나던 스크롤 시 겹침/간섭 현상을 없앤다. 두 표가 같은 colgroup을
 # 공유해야 컬럼 폭이 서로 어긋나지 않는다.
 if show_revenue_cols:
-    per_platform_widths = [15, 8, 6, 5, 6, 3] if show_site_col else [16, 9, 7, 5, 7, 3]
+    per_platform_widths = [13, 8, 6, 5, 6, 5] if show_site_col else [13, 9, 7, 5, 7, 6]
     lead_widths = [9, 5] if show_site_col else [6]
 else:
     per_platform_widths = [18, 10, 8, 6] if show_site_col else [20, 11, 9, 6]
     lead_widths = [10, 6] if show_site_col else [8]
 col_widths = lead_widths + per_platform_widths * 2
 colgroup_html = "<colgroup>" + "".join(f'<col style="width:{w}%">' for w in col_widths) + "</colgroup>"
+
+# 카카오T/모두의주차장 각 블록의 첫 컬럼(상품명) 위치에 세로 구분선을 긋는다. 상품종류/
+# 현장명 유무와 매출 컬럼 표시 여부에 따라 위치가 바뀌므로 nth-child 인덱스를 계산해서 쓴다.
+lead_col_count = len(lead_widths)
+kakao_block_start = lead_col_count + 1
+modu_block_start = lead_col_count + n_platform_cols + 1
 
 header_table_html = (
     '<table class="compare-table">'
@@ -728,8 +753,8 @@ header_table_html = (
     "</tr>"
     "<tr>"
     f"{site_header}<th>상품종류</th>"
-    f"<th>상품명</th><th>요일</th><th>가격</th><th>재고</th>{platform_header_extra}"
-    f"<th>상품명</th><th>요일</th><th>가격</th><th>재고</th>{platform_header_extra}"
+    f'<th>상품명</th><th>요일</th><th class="num-cell">가격</th><th class="num-cell">재고</th>{platform_header_extra}'
+    f'<th>상품명</th><th>요일</th><th class="num-cell">가격</th><th class="num-cell">재고</th>{platform_header_extra}'
     "</tr>"
     "</thead>"
     "</table>"
@@ -742,26 +767,40 @@ body_table_html = (
 )
 
 render_html(
-    """
+    f"""
     <style>
-    .compare-table-wrap { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-    .compare-table-wrap table { margin: 0 !important; }
-    .compare-table-body-wrap { max-height: 900px; overflow-y: auto; display: block; }
+    .compare-table-wrap {{ border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }}
+    .compare-table-wrap table {{ margin: 0 !important; }}
+    .compare-table-body-wrap {{ max-height: 900px; overflow-y: auto; display: block; }}
     /* 고정 px 대신 뷰포트 폭에 비례하는 글씨 크기를 써서, 브라우저 확대/축소로 실질 뷰포트
        폭이 줄어들 때 텍스트가 두 줄로 밀리거나 "..."로 잘리는 대신 글씨가 함께 작아지게 한다. */
-    table.compare-table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: clamp(10px, 0.85vw, 14px); color: var(--text-primary); }
-    table.compare-table th.grp-basic { background:var(--surface-1); padding:8px 12px; }
-    table.compare-table th.grp-kakao { background:#FAEEDA; color:#412402; padding:8px 12px; font-weight:500; }
-    table.compare-table th.grp-modu { background:#E6F1FB; color:#042C53; padding:8px 12px; font-weight:500; }
-    table.compare-table .brand-logo { height:16px; width:auto; vertical-align:middle; margin-right:6px; }
-    table.compare-table .brand-logo-modu { height:20px; border-radius:4px; }
-    table.compare-table thead tr:nth-child(2) th { background:var(--surface-1); color:var(--text-secondary); padding:6px 12px; font-weight:500; text-align:left; }
-    table.compare-table td { text-align:left; padding:6px 12px; border:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    table.compare-table td.group-cell { font-weight:600; vertical-align:middle; }
-    table.compare-table td.no-data-label { color:var(--text-muted); }
-    table.compare-table td.dash-cell { color:var(--text-muted); }
-    table.compare-table tr.group-start td { border-top:0.5px solid var(--border-strong); }
-    table.compare-table tbody tr:hover { background-color: rgba(255,255,255,0.05); }
+    table.compare-table {{ border-collapse: collapse; width: 100%; table-layout: fixed; font-size: clamp(10px, 0.85vw, 14px); color: var(--text-primary); }}
+    table.compare-table th.grp-basic {{ background:var(--surface-1); padding:8px 12px; }}
+    table.compare-table th.grp-kakao {{ background:var(--surface-1); color:#F5C518; padding:8px 12px; font-weight:500; }}
+    table.compare-table th.grp-modu {{ background:var(--surface-1); color:#378ADD; padding:8px 12px; font-weight:500; }}
+    table.compare-table .brand-logo {{ height:16px; width:auto; vertical-align:middle; margin-right:6px; }}
+    table.compare-table .brand-logo-modu {{ height:20px; border-radius:4px; }}
+    table.compare-table thead tr:nth-child(2) th {{ background:var(--surface-1); color:var(--text-secondary); padding:6px 12px; font-weight:500; text-align:left; }}
+    /* Streamlit 마크다운 테이블 기본 스타일이 각 행 아래에 border-bottom을 깔아두는데,
+       border-collapse:collapse 하에서는 우리가 border:none을 줘도 그 기본 실선을 못 이긴다
+       (충돌 해소 규칙상 style:none은 항상 지고, style:hidden만 무조건 이김). 그래서 같은 상품종류
+       그룹 안에서도 상품 행마다 원치 않는 가로줄이 보였음 — border-bottom-style만 hidden으로
+       명시해서 그 기본값을 무력화한다. */
+    table.compare-table td {{ text-align:left; padding:6px 12px; border:none; border-bottom-style:hidden; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    table.compare-table td.group-cell {{ font-weight:600; vertical-align:middle; }}
+    table.compare-table td.no-data-label {{ color:var(--text-muted); }}
+    table.compare-table td.dash-cell {{ color:var(--text-muted); }}
+    table.compare-table td.num-cell, table.compare-table th.num-cell {{ text-align:right; font-variant-numeric:tabular-nums; }}
+    table.compare-table td.rev-cell, table.compare-table th.rev-cell {{ border-left:1px solid var(--border); padding-left:16px; }}
+    /* 상품종류/현장명 열과 카카오T 블록 사이, 그리고 카카오T 블록과 모두의주차장 블록 사이
+       경계에 세로 구분선을 긋는다(매출 컬럼 표시 여부와 무관하게 항상 같은 블록 경계). */
+    table.compare-table thead tr:nth-child(2) th:nth-child({kakao_block_start}),
+    table.compare-table tbody td:nth-child({kakao_block_start}),
+    table.compare-table thead tr:nth-child(2) th:nth-child({modu_block_start}),
+    table.compare-table tbody td:nth-child({modu_block_start}) {{ border-left:1px solid var(--border-strong); }}
+    table.compare-table tr.group-start td {{ border-top:0.5px solid var(--border-strong); }}
+    table.compare-table tbody tr.zebra-alt {{ background-color: rgba(255,255,255,0.03); }}
+    table.compare-table tbody tr:hover {{ background-color: rgba(255,255,255,0.05); }}
     </style>
     """
 )
