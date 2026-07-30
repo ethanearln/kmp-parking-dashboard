@@ -1,4 +1,5 @@
 import base64
+import calendar
 import html
 import math
 import os
@@ -229,8 +230,13 @@ show_revenue = st.sidebar.checkbox("기간별 매출/건수 보기", key="show_r
 revenue_range = None
 if show_revenue:
     _today = date.today()
+    # 카카오 정기권 매출은 "정기권_NEXT"로 최대 익월 1일자까지 미리 귀속되므로, 조회 상한도
+    # 오늘이 아니라 익월 말일까지 열어둬야 그 매출을 조회 기간에 포함시킬 수 있다.
+    _next_month = _today.month % 12 + 1
+    _next_month_year = _today.year + (_today.month // 12)
+    _max_revenue_date = date(_next_month_year, _next_month, calendar.monthrange(_next_month_year, _next_month)[1])
     revenue_range = st.sidebar.date_input(
-        "매출 조회 기간", value=(_today.replace(day=1), _today), max_value=_today
+        "매출 조회 기간", value=(_today.replace(day=1), _today), max_value=_max_revenue_date
     )
     if st.sidebar.button("기간 선택 취소"):
         st.session_state["_reset_revenue_period"] = True
