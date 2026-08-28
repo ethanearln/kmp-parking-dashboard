@@ -1,6 +1,7 @@
 import base64
 import calendar
 import html
+import io
 import math
 import os
 import re
@@ -11,6 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 st.set_page_config(page_title="현장별 플랫폼 상품 비교", layout="wide")
 
@@ -634,6 +636,47 @@ if show_revenue_cols:
     })
     display_df = display_df.merge(kakao_rev, on=["pjt_code", "kakao_product_id"], how="left")
     display_df = display_df.merge(modu_rev, on=["pjt_code", "modu_product_id"], how="left")
+
+
+def build_export_bytes(export_source, show_revenue_cols):
+    # display_df는 렌더링 단계(body_rows 구성)에서만 반복되는 현장명/상품종류를 비워 보여줄 뿐,
+    # 데이터 자체에는 매 행마다 값이 채워져 있어 그대로 내보내면 "화면과 같은 값 + 행마다 채움"이 된다.
+    kakao_cols = ["kakao_product_name", "kakao_sales_days", "kakao_price", "kakao_stock"]
+    modu_cols = ["modu_product_name", "modu_sales_days", "modu_price", "modu_stock"]
+    header = ["현장명", "상품종류", "카카오T 상품명", "카카오T 요일", "카카오T 가격", "카카오T 재고"]
+    modu_header = ["모두의주차장 상품명", "모두의주차장 요일", "모두의주차장 가격", "모두의주차장 재고"]
+    if show_revenue_cols:
+        kakao_cols += ["kakao_revenue_amount", "kakao_revenue_count"]
+        modu_cols += ["modu_revenue_amount", "modu_revenue_count"]
+        header += ["카카오T 매출액", "카카오T 건수"]
+        modu_header += ["모두의주차장 매출액", "모두의주차장 건수"]
+    header += modu_header
+
+    export_df = export_source[["site_name", "ticket_type"] + kakao_cols + modu_cols].copy()
+    export_df["kakao_product_name"] = export_df["kakao_product_name"].fillna("")
+    export_df["modu_product_name"] = export_df["modu_product_name"].fillna("")
+    export_df["kakao_sales_days"] = export_df["kakao_sales_days"].fillna("")
+    export_df["modu_sales_days"] = export_df["modu_sales_days"].fillna("")
+    # 원본 상품명/요일 문자열에 엑셀 워크시트가 거부하는 제어 문자가 섞여 들어오는 경우가 있어
+    # (예: "월주차권(\x0b평일야간)") 저장 전에 걸러내지 않으면 IllegalCharacterError로 다운로드 자체가 실패한다.
+    for col in ["site_name", "ticket_type", "kakao_product_name", "kakao_sales_days", "modu_product_name", "modu_sales_days"]:
+        export_df[col] = export_df[col].astype(str).apply(lambda v: ILLEGAL_CHARACTERS_RE.sub("", v))
+    export_df.columns = header
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, sheet_name="상품비교", index=False)
+    return buffer.getvalue()
+
+
+_export_scope = "전체현장" if site_selected == "전체" else site_selected.split(" (")[0]
+_export_bytes = build_export_bytes(display_df, show_revenue_cols)
+st.download_button(
+    "⬇️ 현재 화면 표 다운로드 (Excel)",
+    data=_export_bytes,
+    file_name=f"상품비교_{_export_scope}_{date.today().strftime('%Y%m%d')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
 
 def fmt_num(x):
